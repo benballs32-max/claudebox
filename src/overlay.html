@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+      cursor: crosshair;
+      user-select: none;
+      background: transparent;
+    }
+
+    canvas {
+      position: fixed;
+      top: 0; left: 0;
+      width: 100vw;
+      height: 100vh;
+      display: block;
+    }
+
+    #hint {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      color: rgba(255,255,255,0.7);
+      font-family: 'Courier New', monospace;
+      font-size: 15px;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      pointer-events: none;
+      text-shadow: 0 0 20px rgba(255,90,90,0.8);
+      transition: opacity 0.2s;
+    }
+
+    #hint span {
+      color: rgba(255,90,90,0.9);
+    }
+  </style>
+</head>
+<body>
+  <canvas id="canvas"></canvas>
+  <div id="hint">Click and drag to select • <span>ESC</span> to cancel</div>
+
+  <script>
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const hint = document.getElementById('hint');
+
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+
+    const params = new URLSearchParams(window.location.search);
+    const displayX = parseInt(params.get('displayX')) || 0;
+    const displayY = parseInt(params.get('displayY')) || 0;
+
+    let isDrawing = false;
+    let startX = 0, startY = 0;
+    let currentX = 0, currentY = 0;
+    let rafPending = false;
+
+    function resetState() {
+      isDrawing = false;
+      startX = 0; startY = 0; currentX = 0; currentY = 0;
+      rafPending = false;
+      hint.style.opacity = '1';
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = 'rgba(5, 8, 18, 0.72)';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+    }
+
+    window.overlay.onReset(resetState);
+
+    function drawOverlay() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // Dark overlay
+      ctx.fillStyle = 'rgba(5, 8, 18, 0.72)';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      if (!isDrawing) return;
+
+      const x = Math.min(startX, currentX);
+      const y = Math.min(startY, currentY);
+      const w = Math.abs(currentX - startX);
+      const h = Math.abs(currentY - startY);
+
+      if (w < 2 || h < 2) return;
+
+      // Clear selection area (bright cutout)
+      ctx.clearRect(x, y, w, h);
+
+      // Re-dim slightly inside to show it's selected
+      ctx.fillStyle = 'rgba(5, 8, 18, 0.05)';
+      ctx.fillRect(x, y, w, h);
+
+      // Cyberpunk border
+      ctx.strokeStyle = '#ff3c3c';
+      ctx.lineWidth = 1.5;
+      ctx.shadowColor = '#ff3c3c';
+      ctx.shadowBlur = 8;
+      ctx.strokeRect(x, y, w, h);
+      ctx.shadowBlur = 0;
+
+      // Corner accents
+      const cs = 12;
+      ctx.strokeStyle = '#ff6b35';
+      ctx.lineWidth = 2.5;
+      ctx.shadowColor = '#ff6b35';
+      ctx.shadowBlur = 10;
+
+      // TL
+      ctx.beginPath(); ctx.moveTo(x, y + cs); ctx.lineTo(x, y); ctx.lineTo(x + cs, y); ctx.stroke();
+      // TR
+      ctx.beginPath(); ctx.moveTo(x + w - cs, y); ctx.lineTo(x + w, y); ctx.lineTo(x + w, y + cs); ctx.stroke();
+      // BL
+      ctx.beginPath(); ctx.moveTo(x, y + h - cs); ctx.lineTo(x, y + h); ctx.lineTo(x + cs, y + h); ctx.stroke();
+      // BR
+      ctx.beginPath(); ctx.moveTo(x + w - cs, y + h); ctx.lineTo(x + w, y + h); ctx.lineTo(x + w, y + h - cs); ctx.stroke();
+      ctx.shadowBlur = 0;
+
+      // Dimensions label
+      const label = `${Math.round(w)} × ${Math.round(h)}`;
+      ctx.font = '11px "Courier New"';
+      ctx.fillStyle = '#ff6b35';
+      ctx.shadowColor = '#ff6b35';
+      ctx.shadowBlur = 6;
+      ctx.fillText(label, x + 4, y - 6 > 10 ? y - 6 : y + 14);
+      ctx.shadowBlur = 0;
+    }
+
+    canvas.addEventListener('mousedown', (e) => {
+      isDrawing = true;
+      startX = e.clientX;
+      startY = e.clientY;
+      currentX = e.clientX;
+      currentY = e.clientY;
+      hint.style.opacity = '0';
+    });
+
+    canvas.addEventListener('mousemove', (e) => {
+      if (!isDrawing) return;
+      currentX = e.clientX;
+      currentY = e.clientY;
+      if (!rafPending) {
+        rafPending = true;
+        requestAnimationFrame(() => { drawOverlay(); rafPending = false; });
+      }
+    });
+
+    canvas.addEventListener('mouseup', async (e) => {
+      if (!isDrawing) return;
+      isDrawing = false;
+
+      const x = Math.min(startX, currentX);
+      const y = Math.min(startY, currentY);
+      const w = Math.abs(currentX - startX);
+      const h = Math.abs(currentY - startY);
+
+      if (w < 10 || h < 10) {
+        window.overlay.cancel();
+        return;
+      }
+
+      // Report in virtual screen coords so main can find the right display
+      await window.overlay.captureRegion({ x: x + displayX, y: y + displayY, width: w, height: h });
+    });
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') window.overlay.cancel();
+    });
+
+    // Initial dim
+    ctx.fillStyle = 'rgba(5, 8, 18, 0.72)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  </script>
+</body>
+</html>
