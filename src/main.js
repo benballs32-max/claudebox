@@ -2,11 +2,12 @@ require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') }
 
 const {
   app, BrowserWindow, ipcMain, screen,
-  globalShortcut, Tray, Menu, nativeImage, desktopCapturer
+  globalShortcut, Tray, Menu, nativeImage, desktopCapturer, clipboard
 } = require('electron');
 const path = require('path');
 const fs   = require('fs');
 const Anthropic = require('@anthropic-ai/sdk');
+const { autoUpdater } = require('electron-updater');
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
@@ -17,6 +18,7 @@ const DEFAULT_CONFIG = {
   model: 'claude-sonnet-4-6',
   systemPrompt: '',
   triggerShortcut: 'CommandOrControl+Shift+Space',
+  textTriggerShortcut: 'CommandOrControl+Shift+T',
   presets: [
     { label: 'Explain',   prompt: 'Explain what you see in this image.' },
     { label: 'Fix this',  prompt: "What's wrong here and how would you fix it?" },
@@ -40,7 +42,6 @@ function loadConfig() {
     console.error('Config load error:', e);
     config = { ...DEFAULT_CONFIG };
   }
-  // Dev fallback: use .env key if config has none
   if (!config.apiKey) config.apiKey = process.env.ANTHROPIC_API_KEY || '';
 }
 
@@ -69,11 +70,12 @@ function getClient() {
 
 // ─── State ────────────────────────────────────────────────────────────────────
 
-let mainWindow     = null;
-let overlayWindows = [];
-let tray           = null;
-let capturedImageBase64  = null;
-let conversationHistory  = [];
+let mainWindow          = null;
+let overlayWindows      = [];
+let tray                = null;
+let capturedImages      = [];
+let isAddingRegion      = false;
+let conversationHistory = [];
 
 // ─── Main window ──────────────────────────────────────────────────────────────
 
@@ -96,7 +98,8 @@ function createMainWindow() {
 
   mainWindow.on('hide', () => {
     conversationHistory = [];
-    capturedImageBase64 = null;
+    capturedImages      = [];
+    isAddingRegion      = false;
     if (!mainWindow.isDestroyed()) {
       mainWindow.webContents.send('conversation-reset');
     }
@@ -152,27 +155,140 @@ function hideOverlays() {
 
 // ─── Tray ─────────────────────────────────────────────────────────────────────
 
+function buildTrayMenu() {
+  const modelLabels = {
+    'claude-haiku-4-5-20251001': 'Haiku 4.5',
+    'claude-sonnet-4-6':         'Sonnet 4.6',
+    'claude-opus-4-7':           'Opus 4.7'
+  };
+
+  const modelItems = Object.entries(modelLabels).map(([id, label]) => ({
+    label,
+    type:    'radio',
+    checked: config.model === id,
+    click:   () => {
+      saveConfig({ model: id });
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('model-changed', id);
+      }
+      buildTrayMenu();
+    }
+  }));
+
+  const menu = Menu.buildFromTemplate([
+    { label: `Snip  [${config.triggerShortcut}]`,     click: () => triggerCapture() },
+    { label: `Text  [${config.textTriggerShortcut}]`, click: () => triggerTextCapture() },
+    { type: 'separator' },
+    { label: 'Model', submenu: modelItems },
+    {
+      label: 'Settings',
+      click: () => {
+        if (!mainWindow || mainWindow.isDestroyed()) createMainWindow();
+        const send = () => mainWindow.webContents.send('open-settings');
+        if (mainWindow.webContents.isLoading()) {
+          mainWindow.webContents.once('did-finish-load', send);
+        } else {
+          send();
+        }
+        mainWindow.show();
+        mainWindow.focus();
+      }
+    },
+    { type: 'separator' },
+    { label: 'Quit', click: () => app.quit() }
+  ]);
+
+  tray.setContextMenu(menu);
+}
+
 function createTray() {
   const icon = nativeImage.createEmpty();
   tray = new Tray(icon);
   tray.setToolTip('ClaudeBox — ZavTech AI');
-  tray.setContextMenu(Menu.buildFromTemplate([
-    { label: 'Open ClaudeBox', click: () => triggerCapture() },
-    { type: 'separator' },
-    { label: 'Quit', click: () => app.quit() }
-  ]));
   tray.on('click', () => triggerCapture());
+  buildTrayMenu();
+}
+
+// ─── Shortcuts ────────────────────────────────────────────────────────────────
+
+function registerShortcuts() {
+  globalShortcut.unregisterAll();
+  const snapOk = globalShortcut.register(config.triggerShortcut,     () => triggerCapture());
+  const textOk = globalShortcut.register(config.textTriggerShortcut, () => triggerTextCapture());
+  if (!snapOk) console.error('Snip shortcut failed to register:', config.triggerShortcut);
+  if (!textOk) console.error('Text shortcut failed to register:', config.textTriggerShortcut);
 }
 
 // ─── Capture flow ─────────────────────────────────────────────────────────────
 
 function triggerCapture() {
   conversationHistory = [];
-  capturedImageBase64 = null;
+  capturedImages      = [];
+  isAddingRegion      = false;
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('conversation-reset');
   }
   showOverlays();
+}
+
+function triggerTextCapture() {
+  conversationHistory = [];
+  capturedImages      = [];
+  isAddingRegion      = false;
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('conversation-reset');
+  }
+
+  const text = clipboard.readText();
+
+  if (!mainWindow || mainWindow.isDestroyed()) createMainWindow();
+
+  const send = () => {
+    if (!text || !text.trim()) {
+      mainWindow.webContents.send('text-capture-status', 'empty');
+    } else {
+      mainWindow.webContents.send('text-ready', text);
+    }
+  };
+
+  if (mainWindow.webContents.isLoading()) {
+    mainWindow.webContents.once('did-finish-load', send);
+  } else {
+    send();
+  }
+
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+// ─── Auto-updater ─────────────────────────────────────────────────────────────
+
+function setupAutoUpdater() {
+  if (!app.isPackaged) return;
+
+  autoUpdater.autoDownload       = true;
+  autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.logger             = { info: console.log, warn: console.warn, error: console.error };
+
+  autoUpdater.on('update-available', (info) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('update-available', info.version);
+    }
+  });
+
+  autoUpdater.on('update-downloaded', (info) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('update-downloaded', info.version);
+    }
+  });
+
+  autoUpdater.on('error', (err) => {
+    console.error('Auto-updater error:', err.message);
+  });
+
+  setTimeout(() => {
+    autoUpdater.checkForUpdates().catch(err => console.error('Update check failed:', err.message));
+  }, 4000);
 }
 
 // ─── IPC ──────────────────────────────────────────────────────────────────────
@@ -180,23 +296,28 @@ function triggerCapture() {
 ipcMain.handle('get-config', () => ({ ...config }));
 
 ipcMain.handle('save-config', (_, updates) => {
-  const oldShortcut = config.triggerShortcut;
+  const shortcutChanged = updates.triggerShortcut || updates.textTriggerShortcut;
+  const prevShortcuts   = { triggerShortcut: config.triggerShortcut, textTriggerShortcut: config.textTriggerShortcut };
+
   saveConfig(updates);
 
-  if (updates.triggerShortcut && updates.triggerShortcut !== oldShortcut) {
-    globalShortcut.unregisterAll();
-    const ok = globalShortcut.register(config.triggerShortcut, () => triggerCapture());
-    if (!ok) {
-      saveConfig({ triggerShortcut: oldShortcut });
-      globalShortcut.register(oldShortcut, () => triggerCapture());
+  if (shortcutChanged) {
+    try {
+      registerShortcuts();
+    } catch (e) {
+      saveConfig(prevShortcuts);
+      registerShortcuts();
       return { success: false, error: 'Shortcut already in use or invalid' };
     }
   }
+
+  buildTrayMenu();
   return { success: true };
 });
 
 ipcMain.on('set-model', (_, model) => {
   saveConfig({ model });
+  buildTrayMenu();
 });
 
 ipcMain.handle('validate-api-key', async (_, apiKey) => {
@@ -218,7 +339,7 @@ ipcMain.handle('capture-region', async (_, rect) => {
     hideOverlays();
 
     const displays = screen.getAllDisplays();
-    const cx = rect.x + rect.width / 2;
+    const cx = rect.x + rect.width  / 2;
     const cy = rect.y + rect.height / 2;
     const targetDisplay = displays.find(d =>
       cx >= d.bounds.x && cx < d.bounds.x + d.bounds.width &&
@@ -242,45 +363,78 @@ ipcMain.handle('capture-region', async (_, rect) => {
     if (!source) throw new Error('No screen source found');
 
     const cropped = source.thumbnail.crop({
-      x: Math.max(0, Math.round((rect.x - targetDisplay.bounds.x) * scale)),
-      y: Math.max(0, Math.round((rect.y - targetDisplay.bounds.y) * scale)),
+      x:      Math.max(0, Math.round((rect.x - targetDisplay.bounds.x) * scale)),
+      y:      Math.max(0, Math.round((rect.y - targetDisplay.bounds.y) * scale)),
       width:  Math.max(1, Math.round(rect.width  * scale)),
       height: Math.max(1, Math.round(rect.height * scale))
     });
 
-    capturedImageBase64 = cropped.toDataURL();
+    const dataUrl = cropped.toDataURL();
+    const adding  = isAddingRegion;
+    isAddingRegion = false;
 
-    if (!mainWindow || mainWindow.isDestroyed()) createMainWindow();
-
-    if (mainWindow.webContents.isLoading()) {
-      mainWindow.webContents.once('did-finish-load', () => {
-        mainWindow.webContents.send('image-ready', capturedImageBase64);
-      });
+    if (adding) {
+      capturedImages.push(dataUrl);
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('image-added', dataUrl);
+      }
     } else {
-      mainWindow.webContents.send('image-ready', capturedImageBase64);
+      capturedImages = [dataUrl];
+
+      if (!mainWindow || mainWindow.isDestroyed()) createMainWindow();
+
+      const send = () => mainWindow.webContents.send('image-ready', dataUrl);
+      if (mainWindow.webContents.isLoading()) {
+        mainWindow.webContents.once('did-finish-load', send);
+      } else {
+        send();
+      }
+
+      mainWindow.show();
+      mainWindow.focus();
     }
 
-    mainWindow.show();
-    mainWindow.focus();
-    return capturedImageBase64;
+    return dataUrl;
   } catch (err) {
     console.error('Capture error:', err);
+    isAddingRegion = false;
     return null;
   }
 });
 
-ipcMain.on('cancel-overlay', () => hideOverlays());
+ipcMain.on('add-region', () => {
+  isAddingRegion = true;
+  showOverlays();
+});
 
-ipcMain.handle('send-to-claude', async (_, { prompt, imageDataUrl }) => {
+ipcMain.on('cancel-overlay', () => {
+  isAddingRegion = false;
+  hideOverlays();
+});
+
+ipcMain.handle('send-to-claude', async (_, { prompt, imageDataUrls, capturedText }) => {
   try {
     const userContent = [];
 
-    if (conversationHistory.length === 0 && imageDataUrl) {
-      const base64Data = imageDataUrl.replace(/^data:image\/\w+;base64,/, '');
-      userContent.push({
-        type: 'image',
-        source: { type: 'base64', media_type: 'image/png', data: base64Data }
-      });
+    if (conversationHistory.length === 0) {
+      const images = Array.isArray(imageDataUrls)
+        ? imageDataUrls
+        : (imageDataUrls ? [imageDataUrls] : []);
+
+      if (images.length > 0) {
+        images.forEach(dataUrl => {
+          const base64Data = dataUrl.replace(/^data:image\/\w+;base64,/, '');
+          userContent.push({
+            type: 'image',
+            source: { type: 'base64', media_type: 'image/png', data: base64Data }
+          });
+        });
+      } else if (capturedText) {
+        userContent.push({
+          type: 'text',
+          text: `Captured text:\n\`\`\`\n${capturedText}\n\`\`\``
+        });
+      }
     }
 
     userContent.push({ type: 'text', text: prompt });
@@ -288,9 +442,9 @@ ipcMain.handle('send-to-claude', async (_, { prompt, imageDataUrl }) => {
 
     let fullText = '';
     const streamParams = {
-      model: config.model,
+      model:     config.model,
       max_tokens: 1024,
-      messages: conversationHistory
+      messages:  conversationHistory
     };
     if (config.systemPrompt) streamParams.system = config.systemPrompt;
 
@@ -319,10 +473,11 @@ ipcMain.handle('send-to-claude', async (_, { prompt, imageDataUrl }) => {
   }
 });
 
+ipcMain.on('install-update',     () => autoUpdater.quitAndInstall());
 ipcMain.on('clear-conversation', () => { conversationHistory = []; });
-ipcMain.on('window-close',    () => mainWindow?.hide());
-ipcMain.on('window-minimise', () => mainWindow?.minimize());
-ipcMain.on('new-capture',     () => triggerCapture());
+ipcMain.on('window-close',       () => mainWindow?.hide());
+ipcMain.on('window-minimise',    () => mainWindow?.minimize());
+ipcMain.on('new-capture',        () => triggerCapture());
 
 // ─── App lifecycle ────────────────────────────────────────────────────────────
 
@@ -332,11 +487,12 @@ app.whenReady().then(() => {
   createTray();
   createOverlays();
 
-  screen.on('display-added',          recreateOverlays);
-  screen.on('display-removed',        recreateOverlays);
+  screen.on('display-added',           recreateOverlays);
+  screen.on('display-removed',         recreateOverlays);
   screen.on('display-metrics-changed', recreateOverlays);
 
-  globalShortcut.register(config.triggerShortcut, () => triggerCapture());
+  registerShortcuts();
+  setupAutoUpdater();
 
   if (process.argv.includes('--trigger')) triggerCapture();
 });

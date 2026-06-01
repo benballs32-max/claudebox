@@ -5,11 +5,13 @@
   "main": "src/main.js",
   "scripts": {
     "start": "electron .",
-    "build": "electron-builder --win --x64"
+    "build": "electron-builder --win --x64",
+    "build:signed": "powershell -ExecutionPolicy Bypass -File scripts/build-signed.ps1"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
     "dotenv": "^16.4.5",
+    "electron-updater": "^6.8.3",
     "screenshot-desktop": "^1.15.0"
   },
   "devDependencies": {
@@ -32,6 +34,11 @@
     "files": [
       "src/**/*",
       "assets/**/*"
-    ]
+    ],
+    "publish": {
+      "provider": "github",
+      "owner": "benballs32-max",
+      "repo": "claudebox"
+    }
   }
 }
