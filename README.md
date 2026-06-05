@@ -63,6 +63,7 @@ To have it start with Windows: add the `.exe` to your Startup folder (`shell:sta
 - `Ctrl+Shift+Space` is a keyboard shortcut alternative to Stream Deck
 - Click **New Capture** to start a fresh selection without closing the window
 - Click **Copy** to copy the response to clipboard
+- When you build to .exe without entering a anthropic api key - the app will ask you to enter one at first launch.
 
 ---
 
